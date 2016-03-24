@@ -7,4 +7,5 @@ Personal Data Science Repository
 * Templates
 * Coursework
   -- Spark (Python, Scala) 
+  -- algorithms (graph theory)
 
