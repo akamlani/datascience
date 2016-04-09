@@ -1,0 +1,12 @@
+['station', 'station name', 'predecessor', 'predecessor name', 'cost']
+67		Châtelet, -1, nan, 0.0
+173		Louvre, Rivoli, 67, Châtelet, 51.0
+227		Palais Royal, Musée du Louvre, 173, Louvre, Rivoli, 85.0
+356		Tuileries, 227, Palais Royal, Musée du Louvre, 123.0
+77		Concorde, 356, Tuileries, 180.0
+50		Champs Élysées, Clémenceau, 77, Concorde, 234.0
+51		Champs Élysées, Clémenceau, 50, Champs Élysées, Clémenceau, 354.0
+202		Miromesnil, 51, Champs Élysées, Clémenceau, 423.0
+326		Saint-Lazare, 202, Miromesnil, 535.0
+168		Liège, 326, Saint-Lazare, 584.0
+245		Place de Clichy, 168, Liège, 612.0
