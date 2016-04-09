@@ -1,0 +1,111 @@
+---
+title: "clustering"
+author: "Ari Kamlani"
+date: "December 14, 2015"
+output: html_document
+---
+
+#### Load files and create Tables
+```{r, eval=TRUE}
+# Load files and Create Tables
+TabCarbo  <- read.csv("./AreaWksAllcarbo.txt")
+TabCarbof <- TabCarbo[-31, ]
+TabEmpty  <- read.csv("./AreaWksAllEmpty.txt")
+TabEmptyf <- TabEmpty[-31, ]
+TabGlass  <- read.csv("./AreaWksAllglass.txt", header=TRUE, sep="\t", quote="\"", dec=".")
+TabGlassf <- TabGlass[-31, ]
+TabMelam  <- read.csv("./AreaWksAllmelam.txt", header=TRUE, sep="\t", quote="\"", dec=".")
+TabMelamf <- TabMelam[-31, ]
+TabWater  <- read.csv("./AreaWksAllWater.txt", header=TRUE, sep="\t", quote="\"", dec=".")
+TabWaterf <- TabWater[-31, ]
+# create data table
+TableAll  <- rbind(TabCarbof, TabEmptyf, TabGlassf, TabMelamf, TabWaterf)
+X <- TableAll[, c("RATIO21", "RATIO31")]
+colnames(X) <- c("x", "y")
+```
+
+#### Clustering
+##### Use KMeans for Plotting Centroids and Points for clustering
+```{r, eval=TRUE}
+# create clusters centers based on mean
+C1 <- c(mean(TabCarbof[, c("RATIO21")]), mean(TabCarbof[, c("RATIO31")]))
+C2 <- c(mean(TabEmptyf[, c("RATIO21")]), mean(TabEmptyf[, c("RATIO31")]))
+C3 <- c(mean(TabGlassf[, c("RATIO21")]), mean(TabGlassf[, c("RATIO31")]))
+C4 <- c(mean(TabMelamf[, c("RATIO21")]), mean(TabMelamf[, c("RATIO31")]))
+C5 <- c(mean(TabWaterf[, c("RATIO21")]), mean(TabWaterf[, c("RATIO31")]))
+center <- t(data.frame(C1,C2,C3,C4,C5))
+# perform cluster via kmeans (with outliers), create plots for visualization
+km <- kmeans(X, centers=center, iter.max=100, nstart=10)
+plot(X, col=km$cluster)
+points(km$centers, col = 1:2, pch = 8, cex = 2)
+```
+
+##### Plot Clusters via **pam**
+```{r, eval=TRUE}
+# Alternative Packages: PAM(median,mode), Clara(for >200 observations) Package
+# install.packages("fpc")
+# install.packages("cluster")
+library(fpc)
+library(cluster)
+set.seed(12152015)
+# direct pam usage via input Complete Filtered table
+Xprime <- TableAll[, c("RATIO21", "RATIO31")]
+colnames(Xprime) <- c("x", "y")
+pm <- pamk(Xprime, 5)
+cat("Num Clusters: ",pm$nc)
+pm$pamobject$medoids
+plot(Xprime, col=pm$pamobject$clustering)
+points(pm$pamobject$medoids, col = 1:2, pch = 8, cex = 2)
+```
+
+##### Plot Clusters via **pam** and **daisy** dissimilarity matrix
+```{r, eval=TRUE}
+# pam usage based on pairwise dissimilarity matrix
+Xdist <- daisy(Xprime, metric="euclidean", stand=FALSE)
+Xdist <- as.matrix(Xdist)
+pm_dist <- pamk(Xdist, 5)
+cat("Num Clusters: ",pm_dist$nc)
+# nxn matrix: pm_dist$pamobject$medoids
+plot(Xdist, col=pm_dist$pamobject$clustering)
+points(pm_dist$pamobject$medoids, col = 1:2, pch = 8, cex = 2)
+```
+
+##### Loop usage
+- Instead of iterating through each 30 Samples of a clustered table and using a loop to reduce to 10 (30-20) samples for each corresponding table, vectorized operations can be used (e.g. variations of apply on a subsetted dataframe).  Rather than iteratively loop through each of the samples, a vectorized operation on the dataframe could be used.
+
+
+
+#### Outliers
+- Manually **remove outliers** (keep top 10 as identified by minimized distance (d) from each cluster (Ci) {i:1..k})
+```{r, eval=TRUE}
+# filter outliers
+# manually remove distance points for each centroid and keep 10 best points
+filter_outliers <- function(df_in)
+{
+  for(i in 30:11)
+  {
+    xhat <- mean(df_in[, c("x")])  
+    yhat <- mean(df_in[, c("y")])
+    df_in$dx <- abs(xhat - df_in[, c("x")])
+    df_in$dy <- abs(yhat - df_in[, c("y")])
+    df_in$d  <- sqrt( (df_in$dx)**2 + (df_in$dy)**2)
+    df_in    <- df_in[order(df_in$d, decreasing=TRUE), ]
+    df_in    <- df_in[-1,]
+  }
+  return(df_in)
+}
+
+exec_outliers <- function(table_in, partition_size=30)
+{
+  df <- data.frame()
+  for (i in seq(1,150, by=30) )
+  {
+    out <- as.data.frame( filter_outliers(table_in[i:(i+(30-1)),]) )
+    out$cluster <- toString(round(i/30)+1)
+    df <- rbind(df, out)
+  }
+  return (df)
+}
+clustered_filtered_outliers <- exec_outliers(X)
+clustered_filtered_outliers
+```
