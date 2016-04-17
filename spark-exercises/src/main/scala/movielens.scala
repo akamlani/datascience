@@ -1,9 +1,9 @@
 import java.sql.Timestamp
 import java.text.SimpleDateFormat
-import java.util.{GregorianCalendar, Date, Calendar}
+import scala.math.Ordering.Implicits._
+import java.util.{Date, Calendar}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{rdd, Accumulator, SparkConf, SparkContext}
-import org.apache.spark.sql.{DataFrame, SQLContext}
+import org.apache.spark.{SparkConf, SparkContext}
 
 object movielens {
   val packagePath = "/Users/akamlani/Projects/datascience/packages/spark/data/movielens/"
@@ -16,36 +16,38 @@ object movielens {
     val cal = Calendar.getInstance()
     val sdf = new SimpleDateFormat("yyyy-MM-dd");
 
-
-    def queryTransformTimestampRDD(movieRatingsRDDIn: RDD[movieRatings], rddQuery: String):
+    def transformTimestamp(movieRatingsRDDIn: RDD[movieRatings], rddQuery: String):
     Either[RDD[(Date, Long)], RDD[((Int, Int), Long)]]  = {
-      //extract the month from the timestamp object and relate it to the user.id
-      //map by ((Date), userid)
-      val timeSliceFullUsersRDD: RDD[(Date, Long)] = movieRatingsRDDIn.map { obj =>
-        cal.setTime(obj.timestamp)
-        (cal.getTime(), obj.userid)
-      }
-      //map by ((year,month), userid)
-      val timeSliceUsersRDD: RDD[((Int, Int), Long)] = movieRatingsRDDIn.map { obj =>
-        cal.setTime(obj.timestamp)
-        val  year   = cal.get(Calendar.YEAR);
-        val  month  = cal.get(Calendar.MONTH) + 1;      //returns sequence {0-11}
-        val  day    = cal.get(Calendar.DAY_OF_MONTH);   //returns sequence {0-6}
-        ((year, month), obj.userid)
-      }
-      //map by (month, userid)
-      val monthlySliceUsersRDD: RDD[(Int, Long)] = movieRatingsRDDIn.map { obj =>
-        cal.setTime(obj.timestamp)
-        val  year   = cal.get(Calendar.YEAR);
-        val  month  = cal.get(Calendar.MONTH) + 1;      //returns sequence {0-11}
-        val  day    = cal.get(Calendar.DAY_OF_MONTH);   //returns sequence {0-6}
-        (month, obj.userid)
-      }
-
       rddQuery match {
-        case "userDateRDDMapped" =>  Left(timeSliceFullUsersRDD)
-        case "userYearMonthRDDMapped" =>  Right(timeSliceUsersRDD)
-        //case "userMonthlyRDDMapped" =>  Left(monthlySliceUsersRDD)
+        //map by ((Date), userid)
+        case "userDate" =>
+          val tsDateUsersTransfRDD: RDD[(Date, Long)] = movieRatingsRDDIn.map { obj =>
+            cal.setTime(obj.timestamp)
+            (cal.getTime(), obj.userid)
+          }
+          Left(tsDateUsersTransfRDD)
+        //map by ((year,month), userid)
+        case "userYearMonth" =>
+          val tsYearMonthUsersTransfRDD: RDD[((Int, Int), Long)] = movieRatingsRDDIn.map { obj =>
+            cal.setTime(obj.timestamp)
+            val  year   = cal.get(Calendar.YEAR);
+            val  month  = cal.get(Calendar.MONTH) + 1;      //returns sequence {0-11}
+            val  day    = cal.get(Calendar.DAY_OF_MONTH);   //returns sequence {0-6}
+            ((year, month), obj.userid)
+          }
+          Right(tsYearMonthUsersTransfRDD)
+        /*
+        //map by (month, userid)
+        case "userMonth" =>
+          //map by (month, userid)
+          val tsMonthUsersTransfRDD: RDD[(Int, Long)] = movieRatingsRDDIn.map { obj =>
+            cal.setTime(obj.timestamp)
+            val  year   = cal.get(Calendar.YEAR);
+            val  month  = cal.get(Calendar.MONTH) + 1;      //returns sequence {0-11}
+            val  day    = cal.get(Calendar.DAY_OF_MONTH);   //returns sequence {0-6}
+            (month, obj.userid)
+          }
+        */
       }
     }
 
@@ -77,33 +79,31 @@ object movielens {
 
       //group by UserID and unique dates (year, month) in sorted order; no duplicate userids will be registered in the RDD
       //this gives the number of users per a date format (year, month) from their earliest occurence date = REGISTRATION
-      val timeSliceUsersRDD: RDD[((Int, Int), Long)] =
-        queryTransformTimestampRDD(movieRatingsRDDIn, "userYearMonthRDDMapped").right.toOption.get
-      val usersTimeSliceRDD: RDD[(Long, List[(Int, Int)])] =
-        timeSliceUsersRDD.map{case (times,userid) => (userid,times)}
-          .groupByKey()
-          .mapValues{times => times.toList.distinct.sorted}
-          .cache()
-
+      val tsUsersRDD: RDD[((Int, Int), Long)] = transformTimestamp(movieRatingsRDDIn, "userYearMonth").right.toOption.get
       //Calculate two different metrics for new users: 1. by (Year,Month), 2. by Month
       //determine the (year,month) in sorted order of the number of times a new user appears
-      //for each user extract only the earliest time sequence (year, month) => toList(0)
-      val newUsersTimeSliceRDD: RDD[((Int, Int), Int)] = usersTimeSliceRDD.map{case (userid, times) =>
-        (times.toList(0), userid)
-      }.groupByKey().map{case (times, users) =>
-        (times, users.toList.length)
-      }.sortByKey(ascending=true)
-      //determine by month of new users
-      val newUsersViaMonthRDD = newUsersTimeSliceRDD.map{ case (times, newUsers) =>
-        (times._2, newUsers)
+      //for each user extract only the earliest time sequence (year, month)
+      //note the avoidance of grouping the users and extracting the the length to avoid entire RDD sequence in memory
+      val newUsersTsRDD: RDD[((Int, Int), Int)] = tsUsersRDD.map{case (yearMonth, userid) =>
+        (userid, yearMonth)
+      }.reduceByKey( (a,b) => if(a < b) a else b)
+        .map{ case (userid, yearMonth) =>
+          (yearMonth, 1)
+        }.reduceByKey((x,y) => x + y)
+        .sortByKey(ascending=true)
+        .cache()
+
+      //next determine by month of new users
+      val newUsersViaMonthRDD = newUsersTsRDD.map{ case ((year,month), newUsers) =>
+        (month, newUsers)
       }.reduceByKey((a,b) => a + b)
 
       //Collect results and save output
       println("Number of new users per (year, month): ")
-      newUsersTimeSliceRDD.collect.foreach(println)
+      newUsersTsRDD.collect.foreach(println)
       val header1: RDD[String] = sc.parallelize(Array("Year\tMonth\tUserCount"))
       header1.union {
-        newUsersTimeSliceRDD
+        newUsersTsRDD
           .map { case ((year, month), userCnt) => year.toString + "\t" + month.toString + "\t" + userCnt.toString }
       }.coalesce(1, true)
         .saveAsTextFile(packagePath + "/export/KPI_1_BY_YEARMONTH")
@@ -116,28 +116,28 @@ object movielens {
       }.coalesce(1, true)
         .saveAsTextFile(packagePath + "/export/KPI_1_BY_MONTH")
 
-      //no longer required to keep in memory for calculations
-      usersTimeSliceRDD.unpersist()
+      //mark the RDD as no required to be kept in memory
+      newUsersTsRDD.unpersist()
     }
 
     def kpi2CalculateNumInactiveUsers(movieRatingsRDDIn: RDD[movieRatings]) = {
       //KPI 2: determine number of users that are leaving (assuming being inactive for 3 months)
       //DECISION: Inactive = from Latest Date to maximum Date >= 3 Months
-      //for each user time slice period, determine if there has been a 3 month inactive period
+      //for each user time slice period, determine if the latest date has been a 3 month inactive period
       val maxDate: Date = movieRatingsRDDIn.map{ obj =>
         cal.setTime(obj.timestamp)
         sdf.parse( sdf.format(cal.getTime()) );
       }.max();
 
-      val timeSliceFullUsersRDD =
-        queryTransformTimestampRDD(movieRatingsRDDIn, "userDateRDDMapped").left.toOption.get
+      val tsUsersRDD: RDD[(Date, Long)] = transformTimestamp(movieRatingsRDDIn, "userDate").left.toOption.get
+      //get the latest date a user rated out of all of their ratings; excluding HH:MM:SS
+      //note the usage of reduceByKey in comparison to Date objects rather than grouping by the key and sorting
+      val mostRecentUserRatingRDD: RDD[(Long, Date)] = tsUsersRDD.map{case (date, userid) =>
+        cal.setTime(date)
+        (userid, sdf.parse(sdf.format(date)) )
+      }.reduceByKey((a,b) => if(a.compareTo(b) > 0) a else b )
+        .cache()
 
-      //get the latest date a user rated out of all of their ratings
-      val mostRecentUserRatingRDD: RDD[(Long, Date)] =
-        timeSliceFullUsersRDD.map{case (times,userid) => (userid,times)}
-          .groupByKey()
-          .mapValues{times => times.toList.distinct.toList.sortWith(_ after _ )}
-          .mapValues{times => times.toList(0)}
       //determine if the last known date is greater than 3 Months
       //if values is 1 => LEAVING, else staying (-1,0)
       val inactiveUsersRDD: RDD[(Long, Int)] = mostRecentUserRatingRDD.map {case (userid, times) =>
@@ -158,16 +158,20 @@ object movielens {
       val pctInactiveUsers: Float = (totalInactiveUsers.toFloat/totalUniqueUsers) * 100
       println(s"""Total Users: $totalUniqueUsers""")
       println(s"""Inactive Users (Leaving): $totalInactiveUsers, %Leaving: $pctInactiveUsers""")
-      val header: RDD[String] = sc.parallelize(Array("Unique Users\tInactive Users\t % Inactive Users"))
-      header.union { sc.parallelize(Array(totalUniqueUsers.toString + "\t" +
-                     totalInactiveUsers.toString + "\t" + pctInactiveUsers.toString))
+      val header: RDD[String] = sc.parallelize(Array("UniqueUsers\tInactiveUsers\t % InactiveUsers"))
+      header.union { sc.parallelize(Array(totalUniqueUsers.toString + "\t\t" +
+                     totalInactiveUsers.toString + "\t\t" + pctInactiveUsers.toString))
       }.coalesce(1, true)
         .saveAsTextFile(packagePath + "/export/KPI_2_INACTIVE_USERS")
+
+      //mark the RDD as no longer required in memory
+      mostRecentUserRatingRDD.unpersist()
     }
 
     def kpi3CalculateNumRatingsPerMonth(movieRatingsRDDIn: RDD[movieRatings]) = {
       //KPI 3: determine the number of ratings mapped to a given month
       //we make a shortcut here since we know that any reported observation is guaranteed to be a rating made
+      //so we just need to count the ratings per month
       val ratingsPerMonthRDD: RDD[(Int, Int)] = movieRatingsRDDIn.map { obj =>
         cal.setTime(obj.timestamp)
         val  month  = cal.get(Calendar.MONTH) + 1;      //returns sequence {0-11}
@@ -175,7 +179,7 @@ object movielens {
       }.reduceByKey((a,b) => a + b)
       println("Ratings Mapped to a given Month: ")
       ratingsPerMonthRDD.collect.foreach(println)
-      val header: RDD[String] = sc.parallelize(Array("Month\tUserCount"))
+      val header: RDD[String] = sc.parallelize(Array("Month\tRatingCount"))
       header.union {
         ratingsPerMonthRDD.map { case (month, ratingsCnt) =>
           month.toString + "\t" + ratingsCnt.toString
@@ -186,28 +190,37 @@ object movielens {
 
     def kpi4CalculateStatsTopActiveUsers(movieRatingsRDDIn: RDD[movieRatings]) = {
       //KPI 4: Mean + Standard Deviation of 10% most active users based on the average of their ratings
-      //Step 1. Determine Most Active Users based on average of ratings:
-      val topUserRatingsRDD: RDD[((Long, Double), Long)] = movieRatingsRDDIn.map { obj => (obj.userid, obj.rating) }
-        .groupByKey()
-        .mapValues{ v =>
-          val n = v.toList.length
-          val sum = v.toList.sum
-          (sum/n)
-      }.sortBy(kv => kv._2, false).zipWithIndex()
+      /* Step 1. Determine Most Active Users based on average of ratings:
+          Implement with a narrow map rather than with a groupBy to avoid an additional wide operation calculation
+          The wide operation takes much longer as it needs to place all in memory
+          Hence we perform an addition of input keys rather than summing a list of a grouped key and getting the count
+          Alternatively this can have been replaced by CombineByKey
+       */
+      val topUserRatingsRDD: RDD[((Long, Double), Long)] = movieRatingsRDDIn.map { obj =>
+        (obj.userid, (obj.rating, 1))
+      }.reduceByKey{(x, y) =>
+        (x._1 + y._1, x._2 + y._2)
+      }.mapValues { case (summation, counter) =>
+        summation/counter
+      }.sortBy(_._2, false).zipWithIndex()
+        .cache()
 
-      //Step 2. Cut down to include top 10% based on count
+      //Step 2. Cut down to include top 10% based on count and indexes
       //10% most active users (sorted vector count reduced to: 138493 -> 13849)
       val top10Pct: Long = (topUserRatingsRDD.count() * 0.10).round
       val top10PctRDD: RDD[((Long, Double), Long)] = topUserRatingsRDD.filter { case ((userid,rating), idx) => idx < top10Pct}
       //Step 3. Calculate Mean + STD
-      val top10PctMean: Double = top10PctRDD.map {case ((userid,rating), idx) => rating}.mean()
-      val top10PctSTD: Double = top10PctRDD.map {case ((userid,rating), idx) => rating}.stdev()
+      val top10PctMean: Float = top10PctRDD.map {case ((userid,rating), idx) => rating}.mean().toFloat
+      val top10PctSTD: Float = top10PctRDD.map {case ((userid,rating), idx) => rating}.stdev().toFloat
       println( s"""Based on 10% Most Active Users: Mean=$top10PctMean, STD=$top10PctSTD""")
-      //write to file
-      val header: RDD[String] = sc.parallelize(Array("Mean\tStandard Deviation"))
+      //write to file for easy viewing
+      val header: RDD[String] = sc.parallelize(Array("Mean\t\tStandard Deviation"))
       header.union { sc.parallelize(Array(top10PctMean.toString + "\t" + top10PctSTD.toString)) }
         .coalesce(1, true)
         .saveAsTextFile(packagePath + "/export/KPI_4_ACTIVEUSERS_METRICS")
+
+      //mark the RDD as no longer required in memory
+      topUserRatingsRDD.unpersist()
     }
 
     //Movielens 20m dataset is given for the years 1995-2015
@@ -215,10 +228,14 @@ object movielens {
     val movieRatingsRDD: RDD[movieRatings] = mapInputToUserRatings().cache()
     //perform KPI(i) calculations
     kpi1CalculateNumNewUsersMetric(movieRatingsRDD)
+    //Note the definition of INACTIVE in KPI2: (assumes > 3 Months for Max Date of Movielens 20M dataset)
+    //The majority have been in INACTIVE for more than 3 Months!!!
     kpi2CalculateNumInactiveUsers(movieRatingsRDD)
     kpi3CalculateNumRatingsPerMonth(movieRatingsRDD)
     kpi4CalculateStatsTopActiveUsers(movieRatingsRDD)
+    //Reference output data in /<root path>/data/movielens/export/KPI_X_*
 
+    //mark the RDD as no longer required to be kept in memory
     movieRatingsRDD.unpersist()
 
   }
