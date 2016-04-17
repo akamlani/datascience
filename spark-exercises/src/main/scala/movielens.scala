@@ -139,7 +139,7 @@ object movielens {
         .cache()
 
       //determine if the last known date is greater than 3 Months
-      //if values is 1 => LEAVING, else staying (-1,0)
+      //if values is 1 => LEAVING, else staying (-1,0): Note that 0 is interpret as equivalent to same as Max Date
       val inactiveUsersRDD: RDD[(Long, Int)] = mostRecentUserRatingRDD.map {case (userid, times) =>
         //set the maximum date allowed for INACTIVITY
         cal.setTime(maxDate)
@@ -190,50 +190,81 @@ object movielens {
 
     def kpi4CalculateStatsTopActiveUsers(movieRatingsRDDIn: RDD[movieRatings]) = {
       //KPI 4: Mean + Standard Deviation of 10% most active users based on the average of their ratings
+
       /* Step 1. Determine Most Active Users based on average of ratings:
           Implement with a narrow map rather than with a groupBy to avoid an additional wide operation calculation
           The wide operation takes much longer as it needs to place all in memory
           Hence we perform an addition of input keys rather than summing a list of a grouped key and getting the count
           Alternatively this can have been replaced by CombineByKey
        */
-      val topUserRatingsRDD: RDD[((Long, Double), Long)] = movieRatingsRDDIn.map { obj =>
+      val header: RDD[String] = sc.parallelize(Array("Mean\t\tStandard Deviation"))
+      val topUserAvgRatingsRDD: RDD[((Long, Double), Long)] = movieRatingsRDDIn.map { obj =>
         (obj.userid, (obj.rating, 1))
       }.reduceByKey{(x, y) =>
         (x._1 + y._1, x._2 + y._2)
       }.mapValues { case (summation, counter) =>
         summation/counter
       }.sortBy(_._2, false).zipWithIndex()
-        .cache()
 
       //Step 2. Cut down to include top 10% based on count and indexes
-      //10% most active users (sorted vector count reduced to: 138493 -> 13849)
-      val top10Pct: Long = (topUserRatingsRDD.count() * 0.10).round
-      val top10PctRDD: RDD[((Long, Double), Long)] = topUserRatingsRDD.filter { case ((userid,rating), idx) => idx < top10Pct}
+      //10% most active users (sorted)
+      val top10Pct: Long = (topUserAvgRatingsRDD.count() * 0.10).round
+      val top10PctRDD: RDD[((Long, Double), Long)] = topUserAvgRatingsRDD.filter{ case (v, idx) => idx < top10Pct}
       //Step 3. Calculate Mean + STD
-      val top10PctMean: Float = top10PctRDD.map {case ((userid,rating), idx) => rating}.mean().toFloat
-      val top10PctSTD: Float = top10PctRDD.map {case ((userid,rating), idx) => rating}.stdev().toFloat
+      val top10PctMean: Float = top10PctRDD.map {case ((userid,avgRating), idx) => avgRating}.mean().toFloat
+      val top10PctSTD: Float = top10PctRDD.map {case ((userid, avgRating), idx) => avgRating}.stdev().toFloat
       println( s"""Based on 10% Most Active Users: Mean=$top10PctMean, STD=$top10PctSTD""")
       //write to file for easy viewing
-      val header: RDD[String] = sc.parallelize(Array("Mean\t\tStandard Deviation"))
       header.union { sc.parallelize(Array(top10PctMean.toString + "\t" + top10PctSTD.toString)) }
         .coalesce(1, true)
-        .saveAsTextFile(packagePath + "/export/KPI_4_ACTIVEUSERS_METRICS")
+        .saveAsTextFile(packagePath + "/export/KPI_4_ACTIVEUSERS_AVGMETRICS")
 
-      //mark the RDD as no longer required in memory
-      topUserRatingsRDD.unpersist()
+      /*
+      ALT Step 1. Instead of calculate average of their ratings, implement based on frequency (how many times they rated)
+      An even further alternative would be to determine based on a particular time scale (e.g. rated within the month)
+      */
+      val topUserFreqRatingsRDD = movieRatingsRDDIn.map { obj =>
+        (obj.userid, 1)
+      }.reduceByKey{(x, y) =>
+        x + y
+      }.sortBy(k => k._2, false).zipWithIndex()
+      //Step 2. Cut down to include top 10% based on count frequency od ratings per user
+      //10% most active users (sorted)
+      val freqTop10Pct: Long = (topUserFreqRatingsRDD.count() * 0.10).round
+      val freqTop10PctRDD: RDD[((Long, Int), Long)] = topUserFreqRatingsRDD.filter { case (v, idx) => idx < freqTop10Pct}
+      //Step 3. Calculate Mean + STD
+      val movieUserRatingsRDD: RDD[(Long, Double)] = movieRatingsRDDIn.map { obj =>  (obj.userid, obj.rating)}
+      val metricsRDD: RDD[Double] = freqTop10PctRDD.map{case ((userid, counter),idx) =>
+        (userid, counter)
+      }.join(movieUserRatingsRDD)
+        .map{case (userid, (cnt,rating)) => rating}
+
+      val freqTop10PctMean: Float = metricsRDD.mean().toFloat
+      val freqTop10PctSTD: Float  = metricsRDD.stdev().toFloat
+      println( s"""Based on 10% Most Frequent Active Users: Mean=$freqTop10PctMean, STD=$freqTop10PctSTD""")
+      //write to file for easy viewing
+      header.union { sc.parallelize(Array(freqTop10PctMean.toString + "\t" + freqTop10PctSTD.toString)) }
+        .coalesce(1, true)
+        .saveAsTextFile(packagePath + "/export/KPI_4_ACTIVEUSERS_FREQMETRICS")
     }
 
     //Movielens 20m dataset is given for the years 1995-2015
     //Should correlate with: Max Date = (2015,3, 31), Min Date = (1995,1, 9)
     val movieRatingsRDD: RDD[movieRatings] = mapInputToUserRatings().cache()
     //perform KPI(i) calculations
+
+    //Note that for KPI1, we implement two different metrics: new users via (Year,Month) and by Month
     kpi1CalculateNumNewUsersMetric(movieRatingsRDD)
+
     //Note the definition of INACTIVE in KPI2: (assumes > 3 Months for Max Date of Movielens 20M dataset)
     //The majority have been in INACTIVE for more than 3 Months!!!
     kpi2CalculateNumInactiveUsers(movieRatingsRDD)
+
     kpi3CalculateNumRatingsPerMonth(movieRatingsRDD)
+    //Note that for KPI 4: we implement two different methods (based on user average ratings and freq of ratings)
     kpi4CalculateStatsTopActiveUsers(movieRatingsRDD)
-    //Reference output data in /<root path>/data/movielens/export/KPI_X_*
+
+    //!!!!!!Reference output data in /<root path>/data/movielens/export/KPI_X_*
 
     //mark the RDD as no longer required to be kept in memory
     movieRatingsRDD.unpersist()
