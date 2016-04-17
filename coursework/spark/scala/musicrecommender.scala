@@ -1,22 +1,17 @@
-package part2
-
-import java.nio.file.Paths
-import java.sql.Timestamp
-
+import breeze.numerics.sqrt
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Accumulator, SparkConf, SparkContext}
 import org.apache.spark.sql.{DataFrame, SQLContext}
-
-import scala.collection.JavaConverters._
+import org.apache.spark.mllib.recommendation.{ALS, Rating, MatrixFactorizationModel}
+import java.nio.file.{Paths, Files}
 import scala.util.Try
-
 
 object musicrecommender {
   case class MusicRating(userid: Long, gid: Long, counton: Int)
   case class MusicTab(userid: Long, gid: Long, counton: Int, artistname: String)
 
   def main(args: Array[String]): Unit = {
-    //val conf = new SparkConf().setAppName("Workshop").setMaster("mesos://zk://app200.cluster1:2181/mesos")
+    //val conf = new SparkConf().setAppName("MusicRec").setMaster("mesos://zk://app200.cluster1:2181/mesos")
     val conf = new SparkConf().setAppName("MusicRec").setMaster("local[*]")
     val sc = new SparkContext(conf)
     println(sc.master)
@@ -25,6 +20,10 @@ object musicrecommender {
     case class ArtistAlias(badid: Long, goodid: Long)
     case class Artist(artistid: Long, artistname: String)
     case class UserArtist(userid: Long, artistid: Long, playcount: Int)
+
+    val sqlContext: SQLContext = new org.apache.spark.sql.SQLContext(sc)
+    import sqlContext.implicits._
+
 
     def cleanArtistAliasData(): RDD[String] = {
       //Parse and clean the alias RDD format, we don't include the rows that we don't have both correct formatted ids for
@@ -139,6 +138,123 @@ object musicrecommender {
       remappedReloadedUserArtistRDD.map(ua => MusicRating(userid=ua(0).toLong, gid=ua(1).toLong, counton=ua(2).toInt))
     }
 
+    def createMusicTable(defaultArtist: String) = {
+      val musicRatingsBaseRDD: RDD[MusicRating] = createRatings()
+      val artistReloadBaseRDD: RDD[Artist] = loadRemappedArtistData()
+      val artistKeyMapRDD: RDD[(Long, Iterable[String])] = artistReloadBaseRDD.map(ar =>
+        (ar.artistid, ar.artistname)).groupByKey()
+      val musicRatingTableRDD: RDD[MusicTab] = musicRatingsBaseRDD.map(mr =>
+        (mr.gid, (mr.userid, mr.counton)) )
+        .leftOuterJoin(artistKeyMapRDD)
+        .mapValues(kv => (kv._1._1, kv._1._2, kv._2.map(a => a.toList(0)).getOrElse(defaultArtist) ) )
+        .map(kv => MusicTab(userid=kv._2._1, gid=kv._1, counton=kv._2._2, artistname=kv._2._3))
+      //save new format to checkpoint file
+      musicRatingTableRDD.map(mr => mr.userid.toString + "\t" + mr.gid.toString + "\t"
+        + mr.counton + "\t" + mr.artistname + "\t").saveAsTextFile(packagePath + "/export/musicratingstable")
+    }
+
+    def sqlMusicTable(musicTableReloadRDDIn: RDD[MusicTab]) = {
+      val musicRatingsDF: DataFrame = musicTableReloadRDDIn.map(mr => MusicRating(mr.userid, mr.gid, mr.counton)).toDF()
+      musicRatingsDF.registerTempTable("musicrating")
+      sqlContext.sql("SELECT userid, counton from musicrating where counton > 3 LIMIT 5").collect.foreach(println)
+
+      val musicRatingTableDF: DataFrame = musicTableReloadRDDIn.toDF()
+      musicRatingTableDF.registerTempTable("musicratingfull")
+      musicRatingTableDF.printSchema()
+      musicRatingTableDF.explain(true)
+      musicRatingTableDF.show()
+      sqlContext.sql("SELECT userid, gid, artistname from musicratingfull where counton > 3 LIMIT 5").collect.foreach(println)
+    }
+
+
+    //**********Begin User Artist Sequence***********
+
+    if(! Files.exists(Paths.get(packagePath + "/export/")) ) {
+      val artistAliasCleanedLinesRDD: RDD[String] = cleanArtistAliasData()
+      val artistAliasLinesRDD: RDD[ArtistAlias]   = loadArtistAliasData()
+      val badIdsRDD: RDD[Long] = artistAliasLinesRDD.map(al => al.badid)
+      remapUserArtistData(badIdsRDD, artistAliasLinesRDD)
+      //**********Begin Artist Sequence***********
+      cleanArtistData()
+      remapArtistData(badIdsRDD, artistAliasLinesRDD)
+    }
+    val artistReloadBaseRDD: RDD[Artist] = loadRemappedArtistData()
+
+    //**********Begin Music Ratings Sequence***********
+    val no_artist_marker = "No Artist Data Available"
+    createMusicTable(no_artist_marker)
+
+    //translate into Music Table object
+    val musicTableReloadRDD: RDD[MusicTab] = sc.textFile(packagePath + "/export/musicratingstable")
+      .map(_.split('\t')).map(row =>
+      MusicTab(userid=row(0).toLong, gid=row(1).toLong, counton=row(2).toInt, artistname=row(3).toString))
+    val ratings = musicTableReloadRDD.map(ar => Rating(ar.userid.toInt, ar.gid.toInt, ar.counton.toDouble))
+    //reduce columns that have no items in their columns
+    val tab = musicTableReloadRDD.map(mr => (mr.gid, (mr.userid, mr.counton, mr.artistname))).groupByKey()
+
+    //**********Evaluate Model**********
+    // Evaluate the model on rating data
+    val rank = 10
+    val numIterations = 3
+    val alpha  = 1.0
+    val lambda_val = 0.01
+
+    val model = ALS.trainImplicit(ratings, rank, numIterations, lambda_val, alpha)
+    val usersProducts = ratings.map { case Rating(user, product, rate) =>
+      (user, product)
+    }
+    val predictions =
+      model.predict(usersProducts).map { case Rating(user, product, rate) =>
+        ((user, product), rate)
+      }
+    val ratesAndPreds = ratings.map { case Rating(user, product, rate) =>
+      ((user, product), rate)
+    }.join(predictions)
+    val MSE = ratesAndPreds.map { case ((user, product), (r1, r2)) =>
+      val err = (r1 - r2)
+      err * err
+    }.mean()
+    println("Root Mean Squared Error = " + sqrt(MSE))
+
+    //**********Perform ALS recommender system**********
+    val query = "Baroque Treasuries"
+    val musicQueryRDD: RDD[MusicTab] = musicTableReloadRDD.filter(ar => ar.artistname.toString.contains(query))
+    //iterate through each of the Queries userids and use it as input to the Recommendation
+    val numItems = 10
+    musicQueryRDD.take(10).foreach{obj =>
+      println(obj.userid)
+      //returns rating objects for the numItems
+      val recItems: Array[Rating] = model.recommendProducts(obj.userid.toInt, numItems)
+      val recUsers: Array[Rating] = model.recommendUsers(obj.gid.toInt, numItems)
+      //per the Rating object look up the returned gid and in the music table for the artistname
+      for(item <- recItems) {
+        val prod: RDD[Artist] = artistReloadBaseRDD.filter(ar => ar.artistid == item.product)
+        println(item)
+        prod.take(10).foreach(println)
+      }
+    }
+
+
+
+/*
+    //ARCHIVED CODE
+    println(artistReloadBaseRDD.count())
+    artistReloadBaseRDD.take(10).foreach(println)
+
+    //ARCHIVED CODE
+    println( musicRatingsBaseRDD.map(mr => mr.gid).intersection(badIdsRDD).count() )
+    println( musicRatingsBaseRDD.map(mr => mr.gid).subtract(artistKeyMap.keys).count() )
+    musicRatingTableRDD.take(10).foreach(println)
+    println( musicRatingTableRDD.count)
+
+    //ARCHIVED CODE
+    def parseString(s: String): Option[String] = Try(s.toString).toOption
+    val remappedArtistsSetRDD = remappedArtistDataRDD.leftOuterJoin(artistGoodRDD)
+    val flattenRemappedArtistDataRDD = remappedArtistsSetRDD.groupByKey().mapValues{ case ar =>
+      ar.flatMap( tu => List( parseString(tu._1), parseString(tu._2.get)))
+    }.flatMapValues(data => data).map(ar => (ar._1, ar._2.get)).cache()
+*/
+
     //DEBUG CNTS for userArtist
     //println(artistAliasKeyMapRDD.count())             //190892
     //println(userArtistLinesRDD.count())               //24296858
@@ -161,60 +277,6 @@ object musicrecommender {
     //println(remappedArtistsSetRDD.count())            //18488172
     //remappedArtistDataRDD.take(10).foreach(println)
     //remappedArtistsSetRDD.take(10).foreach(println)
-
-    //joint: 24282051
-    //leftouterjoin: 24296858
-    //music ratings - bad ids: 20
-    //music ratings - artiskeymap: 14807
-
-    //**********Begin User Artist Sequence***********
-    //val artistAliasCleanedLinesRDD: RDD[String] = cleanArtistAliasData()
-    val artistAliasLinesRDD: RDD[ArtistAlias]   = loadArtistAliasData()
-    val badIdsRDD: RDD[Long] = artistAliasLinesRDD.map(al => al.badid)
-
-    //remapUserArtistData(badIdsRDD, artistAliasLinesRDD)
-    val musicRatingsBaseRDD: RDD[MusicRating] = createRatings()
-    val sqlContext: SQLContext = new org.apache.spark.sql.SQLContext(sc)
-    import sqlContext.implicits._
-
-    //musicRatingsBaseRDD.take(5).foreach(println)
-    val musicRatingsDF: DataFrame = musicRatingsBaseRDD.map(mr => MusicRating(mr.userid, mr.gid, mr.counton)).toDF()
-    musicRatingsDF.registerTempTable("musicrating")
-    //sqlContext.sql("SELECT userid, counton from musicrating where counton > 3 LIMIT 5").collect.foreach(println)
-
-    //**********Begin Artist Sequence***********
-    //cleanArtistData()
-    //loadCleanedArtistData()
-    //remapArtistData(badIdsRDD, artistAliasLinesRDD)
-    val artistReloadBaseRDD = loadRemappedArtistData()
-    //println(artistReloadBaseRDD.count())
-    //artistReloadBaseRDD.take(10).foreach(println)
-
-    //**********Add to the MusicRatings Information *****
-    val artistKeyMapRDD: RDD[(Long, Iterable[String])] = artistReloadBaseRDD.map(ar => (ar.artistid, ar.artistname)).groupByKey()
-    val musicRatingTableRDD: RDD[MusicTab] = musicRatingsBaseRDD.map(mr => (mr.gid, (mr.userid, mr.counton)))
-      .leftOuterJoin(artistKeyMapRDD)
-      .mapValues(f = kv => (kv._1._1, kv._1._2, kv._2.map(a => a.toList(0)).getOrElse("") ) )
-      .map(kv => MusicTab(userid=kv._2._1, gid=kv._1, counton=kv._2._2, artistname=kv._2._3))
-    val musicRatingTableDF: DataFrame = musicRatingTableRDD.toDF()
-    musicRatingTableDF.registerTempTable("musicratingfull")
-    musicRatingTableDF.printSchema()
-    musicRatingTableDF.explain(true)
-    sqlContext.sql("SELECT userid, gid, artistname from musicratingfull where counton > 3 LIMIT 5").collect.foreach(println)
-
-    //println( musicRatingsBaseRDD.map(mr => mr.gid).intersection(badIdsRDD).count() )
-    //println( musicRatingsBaseRDD.map(mr => mr.gid).subtract(artistKeyMap.keys).count() )
-    //musicRatingTableRDD.take(10).foreach(println)
-    //println( musicRatingTableRDD.count)
-
-/*
-    //ARCHIVED CODE
-    def parseString(s: String): Option[String] = Try(s.toString).toOption
-    val remappedArtistsSetRDD = remappedArtistDataRDD.leftOuterJoin(artistGoodRDD)
-    val flattenRemappedArtistDataRDD = remappedArtistsSetRDD.groupByKey().mapValues{ case ar =>
-      ar.flatMap( tu => List( parseString(tu._1), parseString(tu._2.get)))
-    }.flatMapValues(data => data).map(ar => (ar._1, ar._2.get)).cache()
-*/
 
   }
 }
