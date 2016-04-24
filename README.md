@@ -1,7 +1,7 @@
 datascience
 ===========
 
-Personal Data Science Repository
+Personal Data Science Repository Notables
 
 * Projects
     * [Kaggle Titanic](projects/kaggle/titanic/titanic.ipynb)
