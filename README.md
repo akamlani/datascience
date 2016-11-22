@@ -10,5 +10,6 @@ Personal Data Science Repository Notables
     * Algorithms: [Graph Theory](coursework/algorithms/graphtheory)
     * Statistical Analysis: [Statistical Analysis using R](coursework/stats)
 * Sandbox
+    * [Student Retention, Imbalanced data](sandbox/retention/graduates_retention.ipynb)
     * [San Francisco 2012 Violations](sandbox/cfa/cfa.ipynb)
     * [Twitter Statuses, Hashtags](sandbox/twitter/twitter.ipynb)
