@@ -2,8 +2,9 @@
 Factory Analysis Descriptive Metrics & Breakdown of successful/failed units and tests occurred.
 
 Information is parsed based on encoded directory structure files:
-- {fixture_name}_data/{PASS,FAIL}: based on directory
-- filename: {fixture_name}/data/{PASS,FAIL}/{recorded_date}/filename: e.g. "LB1537330100624_WIEOTR_20161222_162445.csv" or "LB1537330100624_20161222_162445.csv"
+- {fixture_name}/data/{PASS,FAIL}: based on directory
+- filename: {fixture_name}/data/{PASS,FAIL}/{recorded_date}/filename:
+    - e.g. "LB1537330100624_WIEOTR_20161222_162445.csv" or "LB1537330100624_20161222_162445.csv"
 - unit name: first characters before first underscore: "LB1537330100624"
 - timestamp: per last two trailing separators: {date: 20161222, time: 162445}
 
@@ -12,7 +13,8 @@ In this case the PASS case take priority over the unit and is not recorded as a 
 - FAIL CASE: LB1537330100624_WIEOTR_20161222_162445.csv
 - PASS CASE: LB1537330100624_20161222_162530.csv
 
-- The particular reason why a unit failed is listed in the each csv file per: VALUE=FAIL, STATUS=1.  For each of these cases occurrences, the type of TEST is recorded as a failure
+- The particular reason why a unit failed is listed in the each csv file per: VALUE=FAIL, STATUS=1
+    - For each of these cases occurrences, the type of TEST is recorded as a failure
 
 ### Directory Structure
 Currently only processing csv files as an extension
