@@ -1,0 +1,10 @@
+
+{
+    "tests": [
+        {
+            "name":    "voltage",
+            "prefix":  ["V"],
+            "pattern": ["BOLT", "PWR"]
+        }
+    ]
+}
