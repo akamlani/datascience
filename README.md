@@ -13,4 +13,4 @@ Personal Data Science Repository Notables
     * [Student Retention, Imbalanced data](sandbox/retention/graduates_retention.ipynb)
     * [San Francisco 2012 Violations](sandbox/cfa/cfa.ipynb)
     * [Twitter Statuses, Hashtags](sandbox/twitter/twitter.ipynb)
-    * [Factory Units and Experiment Tests](sandbox/factory/factory_metrics.py)
+    * [Factory Units and Experiment Tests](sandbox/factory)
